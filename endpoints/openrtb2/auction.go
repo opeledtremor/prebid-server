@@ -243,8 +243,9 @@ func (deps *endpointDeps) Auction(w http.ResponseWriter, r *http.Request, _ http
 // possible, it will return errors with messages that suggest improvements.
 //
 // If the errors list has at least one element, then no guarantees are made about the returned request.
-func (deps *endpointDeps) parseRequest(httpRequest *http.Request) (req *openrtb2.BidRequest, fpData map[string][]byte, errs []error) {
-	req = &openrtb2.BidRequest{}
+func (deps *endpointDeps) parseRequest(httpRequest *http.Request) (req *openrtb_ext.RequestWrapper, fpData map[string][]byte, errs []error) {
+	req = &openrtb_ext.RequestWrapper{}
+	req.BidRequest = &openrtb2.BidRequest{}
 	errs = nil
 
 	// Pull the request body into a buffer, so we have it for later usage.
@@ -416,7 +417,7 @@ func (deps *endpointDeps) validateRequest(req *openrtb_ext.RequestWrapper) []err
 			return []error{err}
 		}
 
-		if err := validateFPDConfig(bidExt.Prebid); err != nil {
+		if err := validateFPDConfig(*reqPrebid); err != nil {
 			return []error{err}
 		}
 	}
