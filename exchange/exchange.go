@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/evanphx/json-patch"
 	"github.com/mxmCherry/openrtb/v15/openrtb2"
 	"github.com/prebid/prebid-server/stored_requests"
 
@@ -506,13 +507,14 @@ func (e *exchange) getAllBids(
 				e.me.RecordAdapterRequest(bidderRequest.BidderLabels)
 			}()
 
+			fpdErrors := make([]error, 0)
 			if fpdData != nil && fpdData[bidderRequest.BidderName] != nil {
 				//FPD needs to be applied. Bid request may be modified.
 				//To save original bid request new copy will be returned
-				errs := make([]error, 0)
-				bidderRequest.BidRequest = applyFPD(bidderRequest.BidRequest, fpdData[bidderRequest.BidderName], firstPartyData, errs)
-				if len(errs) != 0 {
-					//skip?
+				fpdBidderRequest := applyFPD(bidderRequest.BidRequest, fpdData[bidderRequest.BidderName], firstPartyData, fpdErrors)
+				if len(fpdErrors) == 0 {
+					//skip fpd for this bidder, add error to warnings
+					bidderRequest.BidRequest = fpdBidderRequest
 				}
 			}
 
@@ -542,6 +544,9 @@ func (e *exchange) getAllBids(
 			bidderRequest.BidderLabels.AdapterBids = bidsToMetric(brw.adapterBids)
 			bidderRequest.BidderLabels.AdapterErrors = errorsToMetric(err)
 			// Append any bid validation errors to the error list
+			if len(fpdErrors) > 0 {
+				err = append(err, fpdErrors...)
+			}
 			ae.Errors = errsToBidderErrors(err)
 			ae.Warnings = errsToBidderWarnings(err)
 			brw.adapterExtra = ae
@@ -588,7 +593,19 @@ func applyFPD(bidRequest *openrtb2.BidRequest, fpdData *openrtb_ext.FPDData, fir
 		if bidRequest.User == nil {
 			newBidRequest.User = fpdData.User
 		} else {
-			newBidRequest.User = mergeUser(*bidRequest.User, fpdData.User, firstPartyData["user"])
+			resUser, err := mergeFPD(bidRequest.User, fpdData.User, firstPartyData, "user")
+			if err != nil {
+				errL = append(errL, err)
+				return bidRequest
+			}
+			newUser := &openrtb2.User{}
+			err = json.Unmarshal(resUser, newUser)
+			if err != nil {
+				errL = append(errL, err)
+				return bidRequest
+			}
+
+			newBidRequest.User = newUser
 		}
 	}
 
@@ -596,7 +613,20 @@ func applyFPD(bidRequest *openrtb2.BidRequest, fpdData *openrtb_ext.FPDData, fir
 		if bidRequest.App == nil {
 			newBidRequest.App = fpdData.App
 		} else {
-			newBidRequest.App = mergeApp(*bidRequest.App, fpdData.App, firstPartyData["app"])
+			resApp, err := mergeFPD(bidRequest.App, fpdData.App, firstPartyData, "app")
+			if err != nil {
+				errL = append(errL, err)
+				return bidRequest
+			}
+
+			newApp := &openrtb2.App{}
+			err = json.Unmarshal(resApp, newApp)
+			if err != nil {
+				errL = append(errL, err)
+				return bidRequest
+			}
+
+			newBidRequest.App = newApp
 		}
 	}
 
@@ -604,7 +634,20 @@ func applyFPD(bidRequest *openrtb2.BidRequest, fpdData *openrtb_ext.FPDData, fir
 		if bidRequest.Site == nil {
 			newBidRequest.Site = fpdData.Site
 		} else {
-			newBidRequest.Site = mergeSite(*bidRequest.Site, fpdData.Site, firstPartyData["site"])
+			resSite, err := mergeFPD(bidRequest.Site, fpdData.Site, firstPartyData, "site")
+			if err != nil {
+				errL = append(errL, err)
+				return bidRequest
+			}
+
+			newSite := &openrtb2.Site{}
+			err = json.Unmarshal(resSite, newSite)
+			if err != nil {
+				errL = append(errL, err)
+				return bidRequest
+			}
+
+			newBidRequest.Site = newSite
 		}
 	}
 
@@ -627,169 +670,36 @@ func applyFPD(bidRequest *openrtb2.BidRequest, fpdData *openrtb_ext.FPDData, fir
 	return &newBidRequest
 }
 
-func mergeUser(user openrtb2.User, fpdUser *openrtb2.User, userData []byte) *openrtb2.User {
-	temp := user
-	newUser := temp
+func mergeFPD(input interface{}, fpd interface{}, data map[string][]byte, value string) ([]byte, error) {
 
-	if fpdUser.ID != "" {
-		newUser.ID = fpdUser.ID
+	inputByte, err := json.Marshal(input)
+	if err != nil {
+		return nil, err
 	}
-	if fpdUser.BuyerUID != "" {
-		newUser.BuyerUID = fpdUser.BuyerUID
+	fpdByte, err := json.Marshal(fpd)
+	if err != nil {
+		return nil, err
 	}
-	if fpdUser.Yob != 0 {
-		newUser.Yob = fpdUser.Yob
-	}
-	if fpdUser.Gender != "" {
-		newUser.Gender = fpdUser.Gender
-	}
-	if fpdUser.Keywords != "" {
-		newUser.Keywords = fpdUser.Keywords
-	}
-	if fpdUser.CustomData != "" {
-		newUser.CustomData = fpdUser.CustomData
-	}
-	if fpdUser.Geo != nil {
-		newUser.Geo = fpdUser.Geo
-	}
-	if fpdUser.Data != nil {
-		newUser.Data = fpdUser.Data
-	}
-	if fpdUser.Ext != nil {
-		newUser.Ext = fpdUser.Ext
+	resultMerged, err := jsonpatch.MergePatch(inputByte, fpdByte)
+	if err != nil {
+		return nil, err
 	}
 
 	//If {site,app,user}.data exists, merge it into {site,app,user}.ext.data
 	//Question: if fpdSite.Ext.data exists should it be overwritten with Site.data?
-	if userData != nil {
-		newUserExt, err := jsonutil.SetElement(newUser.Ext, userData, "data")
-		if err != nil {
-			newUser.Ext = newUserExt
-		}
+	if data[value] != nil {
+		extData := buildExtData(data[value])
+		return jsonpatch.MergePatch(resultMerged, extData)
 	}
 
-	return &newUser
+	return resultMerged, err
 }
 
-func mergeApp(app openrtb2.App, fpdApp *openrtb2.App, appData []byte) *openrtb2.App {
-	temp := app
-	newApp := temp
-
-	if fpdApp.ID != "" {
-		newApp.ID = fpdApp.ID
-	}
-	if fpdApp.Name != "" {
-		newApp.Name = fpdApp.Name
-	}
-	if fpdApp.Bundle != "" {
-		newApp.Bundle = fpdApp.Bundle
-	}
-	if fpdApp.Domain != "" {
-		newApp.Domain = fpdApp.Domain
-	}
-	if fpdApp.StoreURL != "" {
-		newApp.StoreURL = fpdApp.StoreURL
-	}
-	if len(fpdApp.Cat) > 0 {
-		newApp.Cat = fpdApp.Cat
-	}
-	if len(fpdApp.SectionCat) > 0 {
-		newApp.SectionCat = fpdApp.SectionCat
-	}
-	if len(fpdApp.PageCat) > 0 {
-		newApp.PageCat = fpdApp.PageCat
-	}
-	if fpdApp.Ver != "" {
-		newApp.Ver = fpdApp.Ver
-	}
-	//cannot distinguish 0 and default values for primitive types
-	newApp.PrivacyPolicy = fpdApp.PrivacyPolicy
-	newApp.Paid = fpdApp.Paid
-
-	if fpdApp.Publisher != nil {
-		newApp.Publisher = fpdApp.Publisher
-	}
-	if fpdApp.Content != nil {
-		newApp.Content = fpdApp.Content
-	}
-	if fpdApp.Keywords != "" {
-		newApp.Keywords = fpdApp.Keywords
-	}
-	if fpdApp.Ext != nil {
-		newApp.Ext = fpdApp.Ext
-	}
-	//If {site,app,user}.data exists, merge it into {site,app,user}.ext.data
-	//Question: if fpdApp.Ext.data exists should it be overwritten with App.data?
-	if appData != nil {
-		newAppExt, err := jsonutil.SetElement(newApp.Ext, appData, "data")
-		if err != nil {
-			newApp.Ext = newAppExt
-		}
-	}
-
-	return &newApp
-}
-
-func mergeSite(site openrtb2.Site, fpdSite *openrtb2.Site, siteData []byte) *openrtb2.Site {
-	temp := site
-	newSite := temp
-
-	if fpdSite.ID != "" {
-		newSite.ID = fpdSite.ID
-	}
-	if fpdSite.Name != "" {
-		newSite.Name = fpdSite.Name
-	}
-	if fpdSite.Domain != "" {
-		newSite.Domain = fpdSite.Domain
-	}
-	if len(fpdSite.Cat) > 0 {
-		newSite.Cat = fpdSite.Cat
-	}
-	if len(fpdSite.SectionCat) > 0 {
-		newSite.SectionCat = fpdSite.SectionCat
-	}
-	if len(fpdSite.PageCat) > 0 {
-		newSite.PageCat = fpdSite.PageCat
-	}
-	if fpdSite.Page != "" {
-		newSite.Page = fpdSite.Page
-	}
-	if fpdSite.Ref != "" {
-		newSite.Ref = fpdSite.Ref
-	}
-	if fpdSite.Search != "" {
-		newSite.Search = fpdSite.Search
-	}
-	newSite.Mobile = fpdSite.Mobile
-	newSite.PrivacyPolicy = fpdSite.PrivacyPolicy
-
-	if fpdSite.Publisher != nil {
-		newSite.Publisher = fpdSite.Publisher
-	}
-	if fpdSite.Content != nil {
-		newSite.Content = fpdSite.Content
-	}
-	if fpdSite.Keywords != "" {
-		newSite.Keywords = fpdSite.Keywords
-	}
-	if fpdSite.Ext != nil {
-		newSite.Ext = fpdSite.Ext
-	}
-
-	//If {site,app,user}.data exists, merge it into {site,app,user}.ext.data
-	//Question: if fpdSite.Ext.data exists should it be overwritten with Site.data?
-	if siteData != nil {
-		//what function to call: SetElement or SetElement2
-		//newSiteExt, err := jsonutil.SetElement(newSite.Ext, siteData, "data")
-		newSiteExt, err := jsonutil.SetElement(newSite.Ext, siteData, "data")
-
-		if err == nil {
-			newSite.Ext = newSiteExt
-		}
-	}
-
-	return &newSite
+func buildExtData(data []byte) []byte {
+	res := []byte(`{"ext":{"data":`)
+	res = append(res, data...)
+	res = append(res, []byte(`}}`)...)
+	return res
 }
 
 func (e *exchange) recoverSafely(bidderRequests []BidderRequest,

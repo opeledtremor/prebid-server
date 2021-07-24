@@ -3580,47 +3580,26 @@ func TestApplyFPD(t *testing.T) {
 
 func TestMergeSite(t *testing.T) {
 
-	if specFiles, err := ioutil.ReadDir("./firstpartydata/site"); err == nil {
+	if specFiles, err := ioutil.ReadDir("./firstpartydata/mergefpd"); err == nil {
 		for _, specFile := range specFiles {
-			fileName := "./firstpartydata/site/" + specFile.Name()
+			fileName := "./firstpartydata/mergefpd/" + specFile.Name()
 
 			fpdFile, err := loadFpdFile(fileName)
 			if err != nil {
 				t.Errorf("Unable to load file: %s", fileName)
 			}
+			rawData := []byte(fpdFile.FirstPartyData["site"])
+			firstPartyData := make(map[string][]byte)
+			firstPartyData["site"] = rawData
 
-			var inputSite openrtb2.Site
-			err = json.Unmarshal(fpdFile.InputRequestData, &inputSite)
-			if err != nil {
-				t.Errorf("Unable to unmarshal input request: %s", fileName)
-			}
-
-			var inputSiteCopy openrtb2.Site
-			err = json.Unmarshal(fpdFile.InputRequestData, &inputSiteCopy)
-			if err != nil {
-				t.Errorf("Unable to unmarshal input request: %s", fileName)
-			}
-
-			var outputSite openrtb2.Site
-			err = json.Unmarshal(fpdFile.OutputRequestData, &outputSite)
-			if err != nil {
-				t.Errorf("Unable to unmarshal output request: %s", fileName)
-			}
 			fpdData := fpdFile.BiddersFPD["appnexus"].Site
 
-			resSite := mergeSite(inputSite, fpdData, fpdFile.FirstPartyData["site"])
+			resSite, err := mergeFPD(fpdFile.InputRequestData, fpdData, firstPartyData, "site")
 
-			assert.Equal(t, inputSite, inputSiteCopy, "Original site should not be modified")
+			assert.Nil(t, err, "Error should be nil")
 
-			if len(resSite.Ext) > 0 {
-				resSiteExt := resSite.Ext
-				expectedSiteExt := outputSite.Ext
-				resSite.Ext = nil
-				outputSite.Ext = nil
-				diffJson(t, "site.ext is incorrect", resSiteExt, expectedSiteExt)
-			}
+			diffJson(t, "Result is incorrect"+fileName, resSite, fpdFile.OutputRequestData)
 
-			assert.Equal(t, &outputSite, resSite, "Incorrect result site")
 		}
 	}
 }
