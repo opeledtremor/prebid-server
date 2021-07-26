@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/evanphx/json-patch"
 	"github.com/mxmCherry/openrtb/v15/openrtb2"
 	"github.com/prebid/prebid-server/stored_requests"
 
@@ -28,7 +27,6 @@ import (
 	"github.com/prebid/prebid-server/metrics"
 	"github.com/prebid/prebid-server/openrtb_ext"
 	"github.com/prebid/prebid-server/prebid_cache_client"
-	"github.com/prebid/prebid-server/util/jsonutil"
 )
 
 type ContextKey string
@@ -155,7 +153,7 @@ type AuctionRequest struct {
 	// LegacyLabels is included here for temporary compatability with cleanOpenRTBRequests
 	// in HoldAuction until we get to factoring it away. Do not use for anything new.
 	LegacyLabels   metrics.Labels
-	FirstPartyData map[string][]byte
+	FirstPartyData map[openrtb_ext.BidderName]*openrtb_ext.FPDData
 }
 
 // BidderRequest holds the bidder specific request and all other
@@ -200,10 +198,6 @@ func (e *exchange) HoldAuction(ctx context.Context, r AuctionRequest, debugLog *
 	// Make our best guess if GDPR applies
 	gdprDefaultValue := e.parseGDPRDefaultValue(r.BidRequest)
 
-	fpdData, reqExt, reqExtPrebid := preprocessFPD(requestExt.Prebid, r.BidRequest.Ext)
-	r.BidRequest.Ext = reqExt
-	requestExt.Prebid = reqExtPrebid
-
 	// Slice of BidRequests, each a copy of the original cleaned to only contain bidder data for the named bidder
 	bidderRequests, privacyLabels, errs := cleanOpenRTBRequests(ctx, r, requestExt, e.gDPR, e.me, gdprDefaultValue, e.privacyConfig, &r.Account)
 
@@ -220,7 +214,7 @@ func (e *exchange) HoldAuction(ctx context.Context, r AuctionRequest, debugLog *
 	// Get currency rates conversions for the auction
 	conversions := e.getAuctionCurrencyRates(requestExt.Prebid.CurrencyConversions)
 
-	adapterBids, adapterExtra, anyBidsReturned := e.getAllBids(auctionCtx, bidderRequests, bidAdjustmentFactors, conversions, r.Account.DebugAllow, r.GlobalPrivacyControlHeader, debugLog.DebugOverride, fpdData, r.FirstPartyData)
+	adapterBids, adapterExtra, anyBidsReturned := e.getAllBids(auctionCtx, bidderRequests, bidAdjustmentFactors, conversions, r.Account.DebugAllow, r.GlobalPrivacyControlHeader, debugLog.DebugOverride, r.FirstPartyData)
 
 	var auc *auction
 	var cacheErrs []error
@@ -315,56 +309,6 @@ func (e *exchange) HoldAuction(ctx context.Context, r AuctionRequest, debugLog *
 
 	// Build the response
 	return e.buildBidResponse(ctx, liveAdapters, adapterBids, r.BidRequest, adapterExtra, auc, bidResponseExt, cacheInstructions.returnCreative, errs)
-}
-
-func preprocessFPD(reqExtPrebid openrtb_ext.ExtRequestPrebid, rawRequestExt json.RawMessage) (map[openrtb_ext.BidderName]*openrtb_ext.FPDData, json.RawMessage, openrtb_ext.ExtRequestPrebid) {
-	//map to store bidder configs to process
-	fpdData := make(map[openrtb_ext.BidderName]*openrtb_ext.FPDData)
-
-	if reqExtPrebid.Data != nil && len(reqExtPrebid.Data.Bidders) != 0 && reqExtPrebid.BidderConfigs != nil {
-
-		//every entry in ext.prebid.bidderconfig[].bidders would also need to be in ext.prebid.data.bidders or it will be ignored
-		bidderTable := make(map[string]bool) //boolean just  to check existence of the element in map
-		for _, bidder := range reqExtPrebid.Data.Bidders {
-			bidderTable[bidder] = true
-		}
-
-		for _, bidderConfig := range *reqExtPrebid.BidderConfigs {
-			for _, bidder := range bidderConfig.Bidders {
-				if bidderTable[bidder] {
-
-					if fpdData[openrtb_ext.BidderName(bidder)] == nil {
-						fpdData[openrtb_ext.BidderName(bidder)] = bidderConfig.FPDConfig.FPDData
-					} else {
-						//this will overwrite previously set site/app/user.
-						//Last defined bidder-specific config will take precedence
-						//Do we need to check it?
-						fpdBidderData := fpdData[openrtb_ext.BidderName(bidder)]
-						if bidderConfig.FPDConfig.FPDData.Site != nil {
-							fpdBidderData.Site = bidderConfig.FPDConfig.FPDData.Site
-						}
-						if bidderConfig.FPDConfig.FPDData.App != nil {
-							fpdBidderData.App = bidderConfig.FPDConfig.FPDData.App
-						}
-						if bidderConfig.FPDConfig.FPDData.User != nil {
-							fpdBidderData.User = bidderConfig.FPDConfig.FPDData.User
-						}
-					}
-				}
-			}
-		}
-	}
-
-	//remove FPD data from request and from request extension
-	rawRequestExt, _ = jsonutil.DropElement(rawRequestExt, bidderconfig)
-	rawRequestExt, _ = jsonutil.DropElement(rawRequestExt, data)
-
-	reqExtPrebid.BidderConfigs = nil
-	if reqExtPrebid.Data != nil {
-		reqExtPrebid.Data.Bidders = nil
-	}
-
-	return fpdData, rawRequestExt, reqExtPrebid
 }
 
 func (e *exchange) parseGDPRDefaultValue(bidRequest *openrtb2.BidRequest) gdpr.Signal {
@@ -482,8 +426,7 @@ func (e *exchange) getAllBids(
 	accountDebugAllowed bool,
 	globalPrivacyControlHeader string,
 	headerDebugAllowed bool,
-	fpdData map[openrtb_ext.BidderName]*openrtb_ext.FPDData,
-	firstPartyData map[string][]byte) (
+	fpdData map[openrtb_ext.BidderName]*openrtb_ext.FPDData) (
 	map[openrtb_ext.BidderName]*pbsOrtbSeatBid,
 	map[openrtb_ext.BidderName]*seatResponseExtra, bool) {
 	// Set up pointers to the bid results
@@ -507,14 +450,15 @@ func (e *exchange) getAllBids(
 				e.me.RecordAdapterRequest(bidderRequest.BidderLabels)
 			}()
 
-			fpdErrors := make([]error, 0)
 			if fpdData != nil && fpdData[bidderRequest.BidderName] != nil {
-				//FPD needs to be applied. Bid request may be modified.
-				//To save original bid request new copy will be returned
-				fpdBidderRequest := applyFPD(bidderRequest.BidRequest, fpdData[bidderRequest.BidderName], firstPartyData, fpdErrors)
-				if len(fpdErrors) == 0 {
-					//skip fpd for this bidder, add error to warnings
-					bidderRequest.BidRequest = fpdBidderRequest
+				if fpdData[bidderRequest.BidderName].Site != nil {
+					bidderRequest.BidRequest.Site = fpdData[bidderRequest.BidderName].Site
+				}
+				if fpdData[bidderRequest.BidderName].App != nil {
+					bidderRequest.BidRequest.App = fpdData[bidderRequest.BidderName].App
+				}
+				if fpdData[bidderRequest.BidderName].User != nil {
+					bidderRequest.BidRequest.User = fpdData[bidderRequest.BidderName].User
 				}
 			}
 
@@ -544,9 +488,6 @@ func (e *exchange) getAllBids(
 			bidderRequest.BidderLabels.AdapterBids = bidsToMetric(brw.adapterBids)
 			bidderRequest.BidderLabels.AdapterErrors = errorsToMetric(err)
 			// Append any bid validation errors to the error list
-			if len(fpdErrors) > 0 {
-				err = append(err, fpdErrors...)
-			}
 			ae.Errors = errsToBidderErrors(err)
 			ae.Warnings = errsToBidderWarnings(err)
 			brw.adapterExtra = ae
@@ -578,128 +519,6 @@ func (e *exchange) getAllBids(
 	}
 
 	return adapterBids, adapterExtra, bidsFound
-}
-
-func applyFPD(bidRequest *openrtb2.BidRequest, fpdData *openrtb_ext.FPDData, firstPartyData map[string][]byte, errL []error) *openrtb2.BidRequest {
-	//copy original request
-	newBidRequest := *bidRequest
-
-	// TODO: If an attribute doesn't pass defined validation checks,
-	// it should be removed from the request with a warning placed
-	// in the messages section of debug output and a log message emitted 1% of the time.
-	// The auction should continue
-
-	if fpdData.User != nil {
-		if bidRequest.User == nil {
-			newBidRequest.User = fpdData.User
-		} else {
-			resUser, err := mergeFPD(bidRequest.User, fpdData.User, firstPartyData, "user")
-			if err != nil {
-				errL = append(errL, err)
-				return bidRequest
-			}
-			newUser := &openrtb2.User{}
-			err = json.Unmarshal(resUser, newUser)
-			if err != nil {
-				errL = append(errL, err)
-				return bidRequest
-			}
-
-			newBidRequest.User = newUser
-		}
-	}
-
-	if fpdData.App != nil {
-		if bidRequest.App == nil {
-			newBidRequest.App = fpdData.App
-		} else {
-			resApp, err := mergeFPD(bidRequest.App, fpdData.App, firstPartyData, "app")
-			if err != nil {
-				errL = append(errL, err)
-				return bidRequest
-			}
-
-			newApp := &openrtb2.App{}
-			err = json.Unmarshal(resApp, newApp)
-			if err != nil {
-				errL = append(errL, err)
-				return bidRequest
-			}
-
-			newBidRequest.App = newApp
-		}
-	}
-
-	if fpdData.Site != nil {
-		if bidRequest.Site == nil {
-			newBidRequest.Site = fpdData.Site
-		} else {
-			resSite, err := mergeFPD(bidRequest.Site, fpdData.Site, firstPartyData, "site")
-			if err != nil {
-				errL = append(errL, err)
-				return bidRequest
-			}
-
-			newSite := &openrtb2.Site{}
-			err = json.Unmarshal(resSite, newSite)
-			if err != nil {
-				errL = append(errL, err)
-				return bidRequest
-			}
-
-			newBidRequest.Site = newSite
-		}
-	}
-
-	//if ((*newBidRequest).Site == nil && (*newBidRequest).App == nil) || ((*newBidRequest).Site != nil && (*newBidRequest).App != nil) {
-	//	errL = append(errL, errors.New("request.site or request.app must be defined, but not both."))
-	//}
-
-	/*if err := deps.validateSite(req.Site); err != nil {
-		errL = append(errL, err)
-	}
-
-	if err := deps.validateApp(req.App); err != nil {
-		errL = append(errL, err)
-	}
-
-	if err := deps.validateUser(req.User, aliases); err != nil {
-		errL = append(errL, err)
-	}*/
-
-	return &newBidRequest
-}
-
-func mergeFPD(input interface{}, fpd interface{}, data map[string][]byte, value string) ([]byte, error) {
-
-	inputByte, err := json.Marshal(input)
-	if err != nil {
-		return nil, err
-	}
-	fpdByte, err := json.Marshal(fpd)
-	if err != nil {
-		return nil, err
-	}
-	resultMerged, err := jsonpatch.MergePatch(inputByte, fpdByte)
-	if err != nil {
-		return nil, err
-	}
-
-	//If {site,app,user}.data exists, merge it into {site,app,user}.ext.data
-	//Question: if fpdSite.Ext.data exists should it be overwritten with Site.data?
-	if data[value] != nil {
-		extData := buildExtData(data[value])
-		return jsonpatch.MergePatch(resultMerged, extData)
-	}
-
-	return resultMerged, err
-}
-
-func buildExtData(data []byte) []byte {
-	res := []byte(`{"ext":{"data":`)
-	res = append(res, data...)
-	res = append(res, []byte(`}}`)...)
-	return res
 }
 
 func (e *exchange) recoverSafely(bidderRequests []BidderRequest,
