@@ -146,14 +146,20 @@ func (deps *endpointDeps) Auction(w http.ResponseWriter, r *http.Request, _ http
 	}()
 
 	req, fpdData, errL := deps.parseRequest(r)
-	rr, _ := req.GetRequestExt()
-	re := rr.GetPrebid()
-	fpdBidderData, reqExtPrebid := preprocessFPD(*re)
-	rr.SetPrebid(&reqExtPrebid)
 
-	resolvedFPD, fpdErrors := deps.buildFPD(req.BidRequest, fpdBidderData, fpdData)
-	if len(fpdErrors) > 0 {
-		errL = append(errL, fpdErrors...)
+	var resolvedFPD map[openrtb_ext.BidderName]*openrtb_ext.FPDData
+	reqExt, _ := req.GetRequestExt()
+	if reqExt != nil {
+		if reqExt.GetPrebid() != nil {
+			fpdBidderData, reqExtPrebid := preprocessFPD(*reqExt.GetPrebid())
+			reqExt.SetPrebid(&reqExtPrebid)
+
+			var fpdErrors []error
+			resolvedFPD, fpdErrors = deps.buildFPD(req.BidRequest, fpdBidderData, fpdData)
+			if len(fpdErrors) > 0 {
+				errL = append(errL, fpdErrors...)
+			}
+		}
 	}
 
 	if errortypes.ContainsFatalError(errL) && writeError(errL, w, &labels) {
@@ -332,22 +338,25 @@ func getFPDData(request []byte) ([]byte, map[string][]byte, error) {
 	}
 	fpdReqData[app] = appFPD
 
+	fpdReqData[user] = []byte{}
 	userDataBytes, _, _, err := jsonparser.Get(request, user, data)
 	if err != nil && err != jsonparser.KeyPathNotFoundError {
 		return request, nil, err
 	}
 
-	var userData []openrtb2.Data
-	userDataCopy := make([]byte, len(userDataBytes))
-	copy(userDataCopy, userDataBytes)
-	err = json.Unmarshal(userDataCopy, &userData)
-	if err != nil {
-		//unable to unmarshal to []openrtb2.Data, meaning this is FPD data
-		request, err = jsonutil.DropElement(request, user, data)
+	if len(userDataBytes) > 0 {
+		var userData []openrtb2.Data
+		userDataCopy := make([]byte, len(userDataBytes))
+		copy(userDataCopy, userDataBytes)
+		err = json.Unmarshal(userDataCopy, &userData)
 		if err != nil {
-			return request, nil, err
+			//unable to unmarshal to []openrtb2.Data, meaning this is FPD data
+			request, err = jsonutil.DropElement(request, user, data)
+			if err != nil {
+				return request, nil, err
+			}
+			fpdReqData[user] = userDataCopy
 		}
-		fpdReqData[user] = userDataCopy
 	}
 
 	return request, fpdReqData, nil

@@ -28,12 +28,12 @@ import (
 	pbc "github.com/prebid/prebid-server/prebid_cache_client"
 	"github.com/prebid/prebid-server/stored_requests"
 	"github.com/prebid/prebid-server/stored_requests/backends/file_fetcher"
+	"github.com/prebid/prebid-server/util/jsonutil"
 
 	"github.com/buger/jsonparser"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/yudai/gojsondiff"
-	"github.com/yudai/gojsondiff/formatter"
 )
 
 func TestNewExchange(t *testing.T) {
@@ -379,7 +379,7 @@ func TestDebugBehaviour(t *testing.T) {
 
 			// If not nil, assert bid extension
 			if test.in.debug {
-				diffJson(t, test.desc, bidRequest.Ext, actualExt.Debug.ResolvedRequest.Ext)
+				jsonutil.DiffJson(t, test.desc, bidRequest.Ext, actualExt.Debug.ResolvedRequest.Ext)
 			}
 		} else if !test.debugData.bidderLevelDebugAllowed && test.debugData.accountLevelDebugAllowed {
 			assert.Equal(t, len(actualExt.Debug.HttpCalls), 0, "%s. ext.debug.httpcalls array should not be empty", "With bidder level debug disable option http calls should be empty")
@@ -2150,7 +2150,7 @@ func runSpec(t *testing.T, filename string, spec *exchangeSpec) {
 	}
 	if spec.IncomingRequest.OrtbRequest.Test == 1 {
 		//compare debug info
-		diffJson(t, "Debug info modified", bid.Ext, spec.Response.Ext)
+		jsonutil.DiffJson(t, "Debug info modified", bid.Ext, spec.Response.Ext)
 	}
 }
 
@@ -3443,188 +3443,6 @@ func TestUpdateHbPbCatDur(t *testing.T) {
 	}
 }
 
-func TestPreprocessFPD(t *testing.T) {
-
-	if specFiles, err := ioutil.ReadDir("./firstpartydata/preprocessfpd"); err == nil {
-		for _, specFile := range specFiles {
-			fileName := "./firstpartydata/preprocessfpd/" + specFile.Name()
-
-			fpdFile, err := loadFpdFile(fileName)
-			if err != nil {
-				t.Errorf("Unable to load file: %s", fileName)
-			}
-			var extReq openrtb_ext.ExtRequestPrebid
-			err = json.Unmarshal(fpdFile.InputRequestData, &extReq)
-			if err != nil {
-				t.Errorf("Unable to unmarshal input request: %s", fileName)
-			}
-
-			fpdData, reqExt, reqExtPrebid := preprocessFPD(extReq, fpdFile.InputRequestData)
-
-			if reqExtPrebid.Data != nil {
-				assert.Nil(t, reqExtPrebid.Data.Bidders, "Global FPD config should be removed from request")
-			}
-			assert.Nil(t, reqExtPrebid.BidderConfigs, "Bidder specific FPD config should be removed from request")
-
-			assert.Equal(t, fpdFile.OutputRequestData, reqExt, "Incorrect request extension")
-
-			assert.Equal(t, len(fpdFile.BiddersFPD), len(fpdData), "Incorrect fpd data")
-
-			for k, v := range fpdFile.BiddersFPD {
-
-				if v.Site != nil {
-					tempSiteExt := fpdData[k].Site.Ext
-					diffJson(t, "site.ext is incorrect", v.Site.Ext, tempSiteExt)
-					//compare extensions first and the site objects without extensions
-					//in case two or more bidders share same config(pointer), ext should be returned back
-					v.Site.Ext = nil
-					fpdData[k].Site.Ext = nil
-					assert.Equal(t, v.Site, fpdData[k].Site, "Incorrect site fpd data")
-					fpdData[k].Site.Ext = tempSiteExt
-				}
-
-				if v.App != nil {
-
-					tempAppExt := fpdData[k].App.Ext
-					diffJson(t, "app.ext is incorrect", v.App.Ext, tempAppExt)
-					//compare extensions first and the app objects without extensions
-					v.App.Ext = nil
-					fpdData[k].App.Ext = nil
-					assert.Equal(t, v.App, fpdData[k].App, "Incorrect app fpd data")
-					fpdData[k].App.Ext = tempAppExt
-				}
-
-				if v.User != nil {
-					tempUserExt := fpdData[k].User.Ext
-					diffJson(t, "user.ext is incorrect", v.User.Ext, tempUserExt)
-					//compare extensions first and the user objects without extensions
-					v.User.Ext = nil
-					fpdData[k].User.Ext = nil
-					assert.Equal(t, v.User, fpdData[k].User, "Incorrect user fpd data")
-					fpdData[k].User.Ext = tempUserExt
-				}
-
-			}
-		}
-	}
-}
-
-func TestApplyFPD(t *testing.T) {
-
-	if specFiles, err := ioutil.ReadDir("./firstpartydata/applyfpd"); err == nil {
-		for _, specFile := range specFiles {
-			fileName := "./firstpartydata/applyfpd/" + specFile.Name()
-
-			fpdFile, err := loadFpdFile(fileName)
-			if err != nil {
-				t.Errorf("Unable to load file: %s", fileName)
-			}
-
-			var inputReq openrtb2.BidRequest
-			err = json.Unmarshal(fpdFile.InputRequestData, &inputReq)
-			if err != nil {
-				t.Errorf("Unable to unmarshal input request: %s", fileName)
-			}
-
-			var inputReqCopy openrtb2.BidRequest
-			err = json.Unmarshal(fpdFile.InputRequestData, &inputReqCopy)
-			if err != nil {
-				t.Errorf("Unable to unmarshal input request: %s", fileName)
-			}
-
-			var outputReq openrtb2.BidRequest
-			err = json.Unmarshal(fpdFile.OutputRequestData, &outputReq)
-			if err != nil {
-				t.Errorf("Unable to unmarshal output request: %s", fileName)
-			}
-			errL := make([]error, 0)
-			fpdData := fpdFile.BiddersFPD["appnexus"]
-
-			d := make(map[string][]byte, 0)
-
-			d["site"] = fpdFile.FirstPartyData["site"]
-			d["app"] = fpdFile.FirstPartyData["app"]
-			d["user"] = fpdFile.FirstPartyData["user"]
-
-			resBidRequest := applyFPD(&inputReq, fpdData, d, errL)
-
-			assert.Len(t, errL, 0, "No errors should be returned")
-			assert.Equal(t, inputReq, inputReqCopy, "Original request should not be modified")
-
-			if resBidRequest.Site != nil && len(resBidRequest.Site.Ext) > 0 {
-				resSiteExt := resBidRequest.Site.Ext
-				expectedSiteExt := outputReq.Site.Ext
-				resBidRequest.Site.Ext = nil
-				outputReq.Site.Ext = nil
-				diffJson(t, "site.ext is incorrect", resSiteExt, expectedSiteExt)
-			}
-			if resBidRequest.App != nil && len(resBidRequest.App.Ext) > 0 {
-				resAppExt := resBidRequest.App.Ext
-				expectedAppExt := outputReq.App.Ext
-				resBidRequest.App.Ext = nil
-				outputReq.App.Ext = nil
-				diffJson(t, "app.ext is incorrect", resAppExt, expectedAppExt)
-			}
-			if resBidRequest.User != nil && len(resBidRequest.User.Ext) > 0 {
-				resUserExt := resBidRequest.User.Ext
-				expectedUserExt := outputReq.User.Ext
-				resBidRequest.User.Ext = nil
-				outputReq.User.Ext = nil
-				diffJson(t, "user.ext is incorrect", resUserExt, expectedUserExt)
-			}
-
-			assert.Equal(t, &outputReq, resBidRequest, "Incorrect result bid request")
-		}
-	}
-}
-
-func TestMergeSite(t *testing.T) {
-
-	if specFiles, err := ioutil.ReadDir("./firstpartydata/mergefpd"); err == nil {
-		for _, specFile := range specFiles {
-			fileName := "./firstpartydata/mergefpd/" + specFile.Name()
-
-			fpdFile, err := loadFpdFile(fileName)
-			if err != nil {
-				t.Errorf("Unable to load file: %s", fileName)
-			}
-			rawData := []byte(fpdFile.FirstPartyData["site"])
-			firstPartyData := make(map[string][]byte)
-			firstPartyData["site"] = rawData
-
-			fpdData := fpdFile.BiddersFPD["appnexus"].Site
-
-			resSite, err := mergeFPD(fpdFile.InputRequestData, fpdData, firstPartyData, "site")
-
-			assert.Nil(t, err, "Error should be nil")
-
-			diffJson(t, "Result is incorrect"+fileName, resSite, fpdFile.OutputRequestData)
-
-		}
-	}
-}
-
-func loadFpdFile(filename string) (fpdFile, error) {
-	var fileData fpdFile
-	fileContents, err := ioutil.ReadFile(filename)
-	if err != nil {
-		return fileData, err
-	}
-	err = json.Unmarshal(fileContents, &fileData)
-	if err != nil {
-		return fileData, err
-	}
-
-	return fileData, nil
-}
-
-type fpdFile struct {
-	InputRequestData  json.RawMessage                                 `json:"inputRequestData,omitempty"`
-	OutputRequestData json.RawMessage                                 `json:"outputRequestData,omitempty"`
-	BiddersFPD        map[openrtb_ext.BidderName]*openrtb_ext.FPDData `json:"biddersFPD,omitempty"`
-	FirstPartyData    map[string]json.RawMessage                      `json:"firstPartyData,omitempty"`
-}
-
 type exchangeSpec struct {
 	GDPREnabled       bool                   `json:"gdpr_enabled"`
 	IncomingRequest   exchangeRequest        `json:"incomingRequest"`
@@ -3757,7 +3575,7 @@ func diffOrtbRequests(t *testing.T, description string, expected *openrtb2.BidRe
 		t.Fatalf("%s failed to marshal expected BidRequest into JSON. %v", description, err)
 	}
 
-	diffJson(t, description, actualJSON, expectedJSON)
+	jsonutil.DiffJson(t, description, actualJSON, expectedJSON)
 }
 
 func diffOrtbResponses(t *testing.T, description string, expected *openrtb2.BidResponse, actual *openrtb2.BidResponse) {
@@ -3780,7 +3598,7 @@ func diffOrtbResponses(t *testing.T, description string, expected *openrtb2.BidR
 		t.Fatalf("%s failed to marshal expected BidResponse into JSON. %v", description, err)
 	}
 
-	diffJson(t, description, actualJSON, expectedJSON)
+	jsonutil.DiffJson(t, description, actualJSON, expectedJSON)
 }
 
 func mapifySeatBids(t *testing.T, context string, seatBids []openrtb2.SeatBid) map[string]*openrtb2.SeatBid {
@@ -3794,32 +3612,6 @@ func mapifySeatBids(t *testing.T, context string, seatBids []openrtb2.SeatBid) m
 		}
 	}
 	return seatMap
-}
-
-// diffJson compares two JSON byte arrays for structural equality. It will produce an error if either
-// byte array is not actually JSON.
-func diffJson(t *testing.T, description string, actual []byte, expected []byte) {
-	t.Helper()
-	diff, err := gojsondiff.New().Compare(actual, expected)
-	if err != nil {
-		t.Fatalf("%s json diff failed. %v", description, err)
-	}
-
-	if diff.Modified() {
-		var left interface{}
-		if err := json.Unmarshal(actual, &left); err != nil {
-			t.Fatalf("%s json did not match, but unmarshalling failed. %v", description, err)
-		}
-		printer := formatter.NewAsciiFormatter(left, formatter.AsciiFormatterConfig{
-			ShowArrayIndex: true,
-		})
-		output, err := printer.Format(diff)
-		if err != nil {
-			t.Errorf("%s did not match, but diff formatting failed. %v", description, err)
-		} else {
-			t.Errorf("%s json did not match expected.\n\n%s", description, output)
-		}
-	}
 }
 
 func mockHandler(statusCode int, getBody string, postBody string) http.Handler {
