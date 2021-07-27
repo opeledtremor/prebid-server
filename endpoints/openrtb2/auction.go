@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/prebid/prebid-server/endpoints/openrtb2/firstpartydata"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -14,7 +15,7 @@ import (
 	"time"
 
 	"github.com/buger/jsonparser"
-	jsonpatch "github.com/evanphx/json-patch"
+	"github.com/evanphx/json-patch"
 	"github.com/gofrs/uuid"
 	"github.com/golang/glog"
 	"github.com/julienschmidt/httprouter"
@@ -36,20 +37,12 @@ import (
 	"github.com/prebid/prebid-server/usersync"
 	"github.com/prebid/prebid-server/util/httputil"
 	"github.com/prebid/prebid-server/util/iputil"
-	"github.com/prebid/prebid-server/util/jsonutil"
 	"golang.org/x/net/publicsuffix"
 	"golang.org/x/text/currency"
 )
 
 const (
 	storedRequestTimeoutMillis = 50
-
-	bidderconfig = "bidderconfig"
-
-	site = "site"
-	app  = "app"
-	user = "user"
-	data = "data"
 )
 
 var (
@@ -151,13 +144,18 @@ func (deps *endpointDeps) Auction(w http.ResponseWriter, r *http.Request, _ http
 	reqExt, _ := req.GetRequestExt()
 	if reqExt != nil {
 		if reqExt.GetPrebid() != nil {
-			fpdBidderData, reqExtPrebid := preprocessFPD(*reqExt.GetPrebid())
+			fpdBidderData, reqExtPrebid := firstpartydata.PreprocessFPD(*reqExt.GetPrebid())
 			reqExt.SetPrebid(&reqExtPrebid)
 
 			var fpdErrors []error
-			resolvedFPD, fpdErrors = deps.buildFPD(req.BidRequest, fpdBidderData, fpdData)
-			if len(fpdErrors) > 0 {
-				errL = append(errL, fpdErrors...)
+			initialFPD, buildFpdErr := firstpartydata.BuildFPD(req.BidRequest, fpdBidderData, fpdData)
+			if len(buildFpdErr) > 0 {
+				errL = append(errL, buildFpdErr...)
+			} else {
+				resolvedFPD, fpdErrors = deps.validateFpdRequest(req.BidRequest, initialFPD)
+				if len(fpdErrors) > 0 {
+					errL = append(errL, fpdErrors...)
+				}
 			}
 		}
 	}
@@ -293,7 +291,7 @@ func (deps *endpointDeps) parseRequest(httpRequest *http.Request) (req *openrtb_
 	}
 
 	//If {site,app,user}.data exists, merge it into {site,app,user}.ext.data and remove {site,app,user}.data
-	requestJson, fpData, err = getFPDData(requestJson)
+	requestJson, fpData, err = firstpartydata.GetFPDData(requestJson)
 	if err != nil {
 		errs = []error{err}
 		return
@@ -322,250 +320,6 @@ func (deps *endpointDeps) parseRequest(httpRequest *http.Request) (req *openrtb_
 	return
 }
 
-func getFPDData(request []byte) ([]byte, map[string][]byte, error) {
-	//If {site,app,user}.data exists, merge it into {site,app,user}.ext.data and remove {site,app,user}.data
-
-	fpdReqData := make(map[string][]byte, 0)
-	request, siteFPD, err := findAndDropElement(request, site, data)
-	if err != nil {
-		return request, nil, err
-	}
-	fpdReqData[site] = siteFPD
-
-	request, appFPD, err := findAndDropElement(request, app, data)
-	if err != nil {
-		return request, nil, err
-	}
-	fpdReqData[app] = appFPD
-
-	fpdReqData[user] = []byte{}
-	userDataBytes, _, _, err := jsonparser.Get(request, user, data)
-	if err != nil && err != jsonparser.KeyPathNotFoundError {
-		return request, nil, err
-	}
-
-	if len(userDataBytes) > 0 {
-		var userData []openrtb2.Data
-		userDataCopy := make([]byte, len(userDataBytes))
-		copy(userDataCopy, userDataBytes)
-		err = json.Unmarshal(userDataCopy, &userData)
-		if err != nil {
-			//unable to unmarshal to []openrtb2.Data, meaning this is FPD data
-			request, err = jsonutil.DropElement(request, user, data)
-			if err != nil {
-				return request, nil, err
-			}
-			fpdReqData[user] = userDataCopy
-		}
-	}
-
-	return request, fpdReqData, nil
-}
-
-func findAndDropElement(input []byte, elementNames ...string) ([]byte, []byte, error) {
-	element, _, _, err := jsonparser.Get(input, elementNames...)
-	if err != nil && err != jsonparser.KeyPathNotFoundError {
-		return input, nil, err
-	}
-	elementCopy := make([]byte, len(element))
-	if element != nil {
-		copy(elementCopy, element)
-
-		input, err = jsonutil.DropElement(input, elementNames...)
-		if err != nil {
-			return input, nil, err
-		}
-	}
-	return input, elementCopy, nil
-}
-
-func (deps *endpointDeps) buildFPD(bidRequest *openrtb2.BidRequest, fpdBidderData map[openrtb_ext.BidderName]*openrtb_ext.FPDData, firstPartyData map[string][]byte) (map[openrtb_ext.BidderName]*openrtb_ext.FPDData, []error) {
-
-	// TODO: If an attribute doesn't pass defined validation checks,
-	// it should be removed from the request with a warning placed
-	// in the messages section of debug output and a log message emitted 1% of the time.
-	// The auction should continue
-
-	errL := make([]error, 0)
-	resolvedFpdData := make(map[openrtb_ext.BidderName]*openrtb_ext.FPDData)
-
-	for bidderName, fpdConfig := range fpdBidderData {
-
-		resolverFpdConfig := &openrtb_ext.FPDData{}
-
-		if fpdConfig.User != nil {
-			if bidRequest.User == nil {
-				resolverFpdConfig.User = fpdConfig.User
-			} else {
-				resUser, err := mergeFPD(bidRequest.User, fpdConfig.User, firstPartyData, "user")
-				if err != nil {
-					errL = append(errL, err)
-					return nil, errL
-				}
-				newUser := &openrtb2.User{}
-				err = json.Unmarshal(resUser, newUser)
-				if err != nil {
-					errL = append(errL, err)
-					return nil, errL
-				}
-
-				resolverFpdConfig.User = newUser
-			}
-		}
-
-		if fpdConfig.App != nil {
-			if bidRequest.App == nil {
-				resolverFpdConfig.App = fpdConfig.App
-			} else {
-				resApp, err := mergeFPD(bidRequest.App, fpdConfig.App, firstPartyData, "app")
-				if err != nil {
-					errL = append(errL, err)
-					return nil, errL
-				}
-
-				newApp := &openrtb2.App{}
-				err = json.Unmarshal(resApp, newApp)
-				if err != nil {
-					errL = append(errL, err)
-					return nil, errL
-				}
-
-				resolverFpdConfig.App = newApp
-			}
-		}
-
-		if fpdConfig.Site != nil {
-			if bidRequest.Site == nil {
-				resolverFpdConfig.Site = fpdConfig.Site
-			} else {
-				resSite, err := mergeFPD(bidRequest.Site, fpdConfig.Site, firstPartyData, "site")
-				if err != nil {
-					errL = append(errL, err)
-					return nil, errL
-				}
-
-				newSite := &openrtb2.Site{}
-				err = json.Unmarshal(resSite, newSite)
-				if err != nil {
-					errL = append(errL, err)
-					return nil, errL
-				}
-
-				resolverFpdConfig.Site = newSite
-			}
-		}
-		tempBidRequest := *bidRequest //copy of bid request to validate FPD
-
-		if resolverFpdConfig.Site != nil {
-			tempBidRequest.Site = resolverFpdConfig.Site
-		}
-		if resolverFpdConfig.App != nil {
-			tempBidRequest.App = resolverFpdConfig.App
-		}
-		if resolverFpdConfig.User != nil {
-			tempBidRequest.User = resolverFpdConfig.User
-		}
-
-		tempRequestWrapper := &openrtb_ext.RequestWrapper{BidRequest: &tempBidRequest}
-		errsList := deps.validateRequest(tempRequestWrapper)
-
-		if len(errsList) == 0 {
-			//valid fpd bidder config - will need to apply it to request
-			resolvedFpdData[bidderName] = resolverFpdConfig
-		} else {
-			//return validation error as InvalidFirstPartyDataWarning
-			for _, fpdValidationError := range errsList {
-				firstPartyDataWarning := errortypes.Warning{
-					WarningCode: errortypes.InvalidFirstPartyDataWarningCode,
-					Message:     fmt.Sprintf("Invalid first party data for bidder %s: %s", bidderName, fpdValidationError),
-				}
-				errL = append(errL, &firstPartyDataWarning)
-			}
-		}
-
-	}
-
-	return resolvedFpdData, errL
-}
-
-func mergeFPD(input interface{}, fpd interface{}, data map[string][]byte, value string) ([]byte, error) {
-
-	inputByte, err := json.Marshal(input)
-	if err != nil {
-		return nil, err
-	}
-	fpdByte, err := json.Marshal(fpd)
-	if err != nil {
-		return nil, err
-	}
-	resultMerged, err := jsonpatch.MergePatch(inputByte, fpdByte)
-	if err != nil {
-		return nil, err
-	}
-
-	//If {site,app,user}.data exists, merge it into {site,app,user}.ext.data
-	//Question: if fpdSite.Ext.data exists should it be overwritten with Site.data?
-	if data[value] != nil {
-		extData := buildExtData(data[value])
-		return jsonpatch.MergePatch(resultMerged, extData)
-	}
-
-	return resultMerged, err
-}
-
-func buildExtData(data []byte) []byte {
-	res := []byte(`{"ext":{"data":`)
-	res = append(res, data...)
-	res = append(res, []byte(`}}`)...)
-	return res
-}
-
-func preprocessFPD(reqExtPrebid openrtb_ext.ExtRequestPrebid) (map[openrtb_ext.BidderName]*openrtb_ext.FPDData, openrtb_ext.ExtRequestPrebid) {
-	//map to store bidder configs to process
-	fpdData := make(map[openrtb_ext.BidderName]*openrtb_ext.FPDData)
-
-	if reqExtPrebid.Data != nil && len(reqExtPrebid.Data.Bidders) != 0 && reqExtPrebid.BidderConfigs != nil {
-
-		//every entry in ext.prebid.bidderconfig[].bidders would also need to be in ext.prebid.data.bidders or it will be ignored
-		bidderTable := make(map[string]bool) //boolean just  to check existence of the element in map
-		for _, bidder := range reqExtPrebid.Data.Bidders {
-			bidderTable[bidder] = true
-		}
-
-		for _, bidderConfig := range *reqExtPrebid.BidderConfigs {
-			for _, bidder := range bidderConfig.Bidders {
-				if bidderTable[bidder] {
-
-					if fpdData[openrtb_ext.BidderName(bidder)] == nil {
-						fpdData[openrtb_ext.BidderName(bidder)] = bidderConfig.FPDConfig.FPDData
-					} else {
-						//this will overwrite previously set site/app/user.
-						//Last defined bidder-specific config will take precedence
-						//Do we need to check it?
-						fpdBidderData := fpdData[openrtb_ext.BidderName(bidder)]
-						if bidderConfig.FPDConfig.FPDData.Site != nil {
-							fpdBidderData.Site = bidderConfig.FPDConfig.FPDData.Site
-						}
-						if bidderConfig.FPDConfig.FPDData.App != nil {
-							fpdBidderData.App = bidderConfig.FPDConfig.FPDData.App
-						}
-						if bidderConfig.FPDConfig.FPDData.User != nil {
-							fpdBidderData.User = bidderConfig.FPDConfig.FPDData.User
-						}
-					}
-				}
-			}
-		}
-	}
-
-	reqExtPrebid.BidderConfigs = nil
-	if reqExtPrebid.Data != nil {
-		reqExtPrebid.Data.Bidders = nil
-	}
-
-	return fpdData, reqExtPrebid
-}
-
 // parseTimeout returns parses tmax from the requestJson, or returns the default if it doesn't exist.
 //
 // requestJson should be the content of the POST body.
@@ -579,6 +333,44 @@ func parseTimeout(requestJson []byte, defaultTimeout time.Duration) time.Duratio
 		}
 	}
 	return defaultTimeout
+}
+
+func (deps *endpointDeps) validateFpdRequest(bidRequest *openrtb2.BidRequest, fpdBiddersData map[openrtb_ext.BidderName]*openrtb_ext.FPDData) (map[openrtb_ext.BidderName]*openrtb_ext.FPDData, []error) {
+
+	errL := make([]error, 0)
+	validatedFpdData := make(map[openrtb_ext.BidderName]*openrtb_ext.FPDData)
+
+	for bidderName, fpdBidderData := range fpdBiddersData {
+		tempBidRequest := *bidRequest //copy of bid request to validate FPD
+
+		if fpdBidderData.Site != nil {
+			tempBidRequest.Site = fpdBidderData.Site
+		}
+		if fpdBidderData.App != nil {
+			tempBidRequest.App = fpdBidderData.App
+		}
+		if fpdBidderData.User != nil {
+			tempBidRequest.User = fpdBidderData.User
+		}
+
+		tempRequestWrapper := &openrtb_ext.RequestWrapper{BidRequest: &tempBidRequest}
+		errsList := deps.validateRequest(tempRequestWrapper)
+
+		if len(errsList) == 0 {
+			//valid fpd bidder config - will need to apply it to request
+			validatedFpdData[bidderName] = fpdBidderData
+		} else {
+			//return validation error as InvalidFirstPartyDataWarning
+			for _, fpdValidationError := range errsList {
+				firstPartyDataWarning := errortypes.Warning{
+					WarningCode: errortypes.InvalidFirstPartyDataWarningCode,
+					Message:     fmt.Sprintf("Invalid first party data for bidder %s: %s", bidderName, fpdValidationError),
+				}
+				errL = append(errL, &firstPartyDataWarning)
+			}
+		}
+	}
+	return validatedFpdData, errL
 }
 
 func (deps *endpointDeps) validateRequest(req *openrtb_ext.RequestWrapper) []error {
@@ -639,7 +431,7 @@ func (deps *endpointDeps) validateRequest(req *openrtb_ext.RequestWrapper) []err
 			return []error{err}
 		}
 
-		if err := validateFPDConfig(*reqPrebid); err != nil {
+		if err := firstpartydata.ValidateFPDConfig(*reqPrebid); err != nil {
 			return []error{err}
 		}
 	}
@@ -784,27 +576,6 @@ func (deps *endpointDeps) validateEidPermissions(prebid *openrtb_ext.ExtRequestP
 		if err := validateBidders(eid.Bidders, deps.bidderMap, aliases); err != nil {
 			return fmt.Errorf(`request.ext.prebid.data.eidpermissions[%d] contains %v`, i, err)
 		}
-	}
-
-	return nil
-}
-
-func validateFPDConfig(reqExtPrebid openrtb_ext.ExtRequestPrebid) error {
-
-	//Both FPD global and bidder specific permissions are specified
-	if reqExtPrebid.Data == nil && reqExtPrebid.BidderConfigs == nil {
-		return nil
-	}
-
-	if reqExtPrebid.Data != nil && len(reqExtPrebid.Data.Bidders) != 0 && reqExtPrebid.BidderConfigs == nil {
-		return errors.New(`request.ext.prebid.data.bidders are specified but reqExtPrebid.BidderConfigs are not`)
-	}
-	if reqExtPrebid.Data != nil && len(reqExtPrebid.Data.Bidders) == 0 && reqExtPrebid.BidderConfigs != nil {
-		return errors.New(`request.ext.prebid.data.bidders are not specified but reqExtPrebid.BidderConfigs are`)
-	}
-
-	if reqExtPrebid.Data == nil && reqExtPrebid.BidderConfigs != nil {
-		return errors.New(`request.ext.prebid.data is not specified but reqExtPrebid.BidderConfigs are`)
 	}
 
 	return nil

@@ -1,7 +1,6 @@
 package jsonutil
 
 import (
-	"fmt"
 	"github.com/stretchr/testify/assert"
 	"strings"
 	"testing"
@@ -209,16 +208,185 @@ func TestSetElement(t *testing.T) {
 	}
 	for _, tt := range tests {
 		res, err := SetElement(tt.input, tt.setValue, tt.setTo...)
-
-		fmt.Println(string(tt.output))
-		fmt.Println(string(res))
-
 		if tt.errorExpected {
 			assert.Error(t, err, "Error should not be nil")
 			assert.True(t, strings.Contains(err.Error(), tt.errorContains))
 		} else {
 			assert.NoError(t, err, "Error should be nil")
 			assert.Equal(t, tt.output, res, "Result is incorrect")
+		}
+	}
+
+}
+
+func TestFindAndDropElement(t *testing.T) {
+	testCases := []struct {
+		description   string
+		input         []byte
+		dataPath      []string
+		output        []byte
+		foundData     []byte
+		errorExpected bool
+		errorContains string
+	}{
+		{
+			description: "Element exists",
+			input: []byte(`{
+  				"id": "bid_id",
+  				"site": {
+  				  "id":"reqSiteId",
+  				  "page": "http://www.foobar.com/1234.html",
+  				  "publisher": {
+  				    "id": "1"
+  				  },
+  				  "data": {"somesitefpd": "sitefpdDataTest"}
+  				},
+  				"tmax": 5000,
+  				"source": {
+  				  "tid": "ad839de0-5ae6-40bb-92b2-af8bad6439b3"
+  				}
+			}`),
+			dataPath: []string{"site", "data"},
+			output: []byte(`{
+  				"id": "bid_id",
+  				"site": {
+  				  "id":"reqSiteId",
+  				  "page": "http://www.foobar.com/1234.html",
+  				  "publisher": {
+  				    "id": "1"
+  				  }
+  				},
+  				"tmax": 5000,
+  				"source": {
+  				  "tid": "ad839de0-5ae6-40bb-92b2-af8bad6439b3"
+  				}
+			}`),
+			foundData:     []byte(`{"somesitefpd": "sitefpdDataTest"}`),
+			errorExpected: false,
+			errorContains: "",
+		},
+		{
+			description: "Element doesn't exists",
+			input: []byte(`{
+  				"id": "bid_id",
+  				"site": {
+  				  "id":"reqSiteId",
+  				  "page": "http://www.foobar.com/1234.html",
+  				  "publisher": {
+  				    "id": "1"
+  				  },
+  				  "data": {"somesitefpd": "sitefpdDataTest"}
+  				},
+  				"tmax": 5000,
+  				"source": {
+  				  "tid": "ad839de0-5ae6-40bb-92b2-af8bad6439b3"
+  				}
+			}`),
+			dataPath: []string{"site", "test"},
+			output: []byte(`{
+  				"id": "bid_id",
+  				"site": {
+  				  "id":"reqSiteId",
+  				  "page": "http://www.foobar.com/1234.html",
+  				  "publisher": {
+  				    "id": "1"
+  				  },
+  				  "data": {"somesitefpd": "sitefpdDataTest"}
+  				},
+  				"tmax": 5000,
+  				"source": {
+  				  "tid": "ad839de0-5ae6-40bb-92b2-af8bad6439b3"
+  				}
+			}`),
+			foundData:     []byte{},
+			errorExpected: false,
+			errorContains: "",
+		},
+		{
+			description: "Non object element exists",
+			input: []byte(`{
+  				"id": "bid_id",
+  				"site": {
+  				  "id":"reqSiteId",
+  				  "page": "http://www.foobar.com/1234.html",
+  				  "publisher": {
+  				    "id": "1"
+  				  },
+  				  "data": {"somesitefpd": "sitefpdDataTest"}
+  				},
+  				"tmax": 5000,
+  				"source": {
+  				  "tid": "ad839de0-5ae6-40bb-92b2-af8bad6439b3"
+  				}
+			}`),
+			dataPath: []string{"site", "id"},
+			output: []byte(`{
+  				"id": "bid_id",
+  				"site": {
+  				  "page": "http://www.foobar.com/1234.html",
+  				  "publisher": {
+  				    "id": "1"
+  				  },
+  				  "data": {"somesitefpd": "sitefpdDataTest"}
+  				},
+  				"tmax": 5000,
+  				"source": {
+  				  "tid": "ad839de0-5ae6-40bb-92b2-af8bad6439b3"
+  				}
+			}`),
+			foundData:     []byte(`reqSiteId`),
+			errorExpected: false,
+			errorContains: "",
+		},
+		{
+			description: "Malformed input",
+			input: []byte(`{
+  				"id": "bid_id",
+  				"site": {
+  				  "id":"reqSiteId",
+  				  "page": "http://www.foobar.com/1234.html",
+  				  "publisher": {
+  				    "id": "1"
+  				  },
+  				  "data":  sitefpdDataTest"}
+  				},
+  				"tmax": 5000,
+  				"source": {
+  				  "tid": "ad839de0-5ae6-40bb-92b2-af8bad6439b3"
+  				}
+			}`),
+			dataPath: []string{"site", "data"},
+			output: []byte(`{
+  				"id": "bid_id",
+  				"site": {
+  				  "id":"reqSiteId",
+  				  "page": "http://www.foobar.com/1234.html",
+  				  "publisher": {
+  				    "id": "1"
+  				  },
+  				  "data":  sitefpdDataTest"}
+  				},
+  				"tmax": 5000,
+  				"source": {
+  				  "tid": "ad839de0-5ae6-40bb-92b2-af8bad6439b3"
+  				}
+			}`),
+			foundData:     []byte(nil),
+			errorExpected: true,
+			errorContains: "Unknown value type",
+		},
+	}
+	for _, test := range testCases {
+		res, data, err := FindAndDropElement(test.input, test.dataPath...)
+
+		if test.errorExpected {
+			assert.Error(t, err, "Error should not be nil")
+			assert.Equal(t, test.output, res, "Result should be still returned")
+			assert.True(t, strings.Contains(err.Error(), test.errorContains))
+		} else {
+			assert.NoError(t, err, "Error should be nil")
+			assert.Equal(t, test.output, res, "Result is incorrect")
+			assert.Equal(t, test.foundData, data, "FPD is incorrect")
 		}
 	}
 

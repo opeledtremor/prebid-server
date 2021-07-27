@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"github.com/buger/jsonparser"
 	"io"
 	"testing"
 
@@ -183,4 +184,21 @@ func DiffJson(t *testing.T, description string, actual []byte, expected []byte) 
 			t.Errorf("%s json did not match expected.\n\n%s", description, output)
 		}
 	}
+}
+
+func FindAndDropElement(input []byte, elementNames ...string) ([]byte, []byte, error) {
+	element, _, _, err := jsonparser.Get(input, elementNames...)
+	if err != nil && err != jsonparser.KeyPathNotFoundError {
+		return input, nil, err
+	}
+	elementCopy := make([]byte, len(element))
+	if element != nil {
+		copy(elementCopy, element)
+
+		input, err = DropElement(input, elementNames...)
+		if err != nil {
+			return input, nil, err
+		}
+	}
+	return input, elementCopy, nil
 }
