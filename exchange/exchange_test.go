@@ -3443,6 +3443,60 @@ func TestUpdateHbPbCatDur(t *testing.T) {
 	}
 }
 
+func TestFPDData(t *testing.T) {
+
+	bidRequest := &openrtb2.BidRequest{
+		ID: "some-request-id",
+		Imp: []openrtb2.Imp{{
+			ID:    "some-impression-id",
+			Video: &openrtb2.Video{W: 100, H: 50},
+			Ext:   json.RawMessage(`{"appnexus": {"placementId": 1}}`),
+		}},
+		Site: &openrtb2.Site{ID: "Req site id", Page: "prebid.org", Ext: json.RawMessage(`{"amp":0}`)},
+		AT:   1,
+		TMax: 500,
+	}
+
+	fpdData := make(map[openrtb_ext.BidderName]*openrtb_ext.FPDData)
+
+	apnFpd := openrtb_ext.FPDData{
+		Site: &openrtb2.Site{ID: "fpdSite"},
+		App:  &openrtb2.App{ID: "fpdApp"},
+		User: &openrtb2.User{ID: "fpdUser"},
+	}
+	fpdData[openrtb_ext.BidderName("appnexus")] = &apnFpd
+
+	e := new(exchange)
+	e.adapterMap = map[openrtb_ext.BidderName]adaptedBidder{
+		openrtb_ext.BidderAppnexus: &fpdBidder{},
+	}
+	e.me = &metricsConf.DummyMetricsEngine{}
+	e.currencyConverter = currency.NewRateConverter(&http.Client{}, "", time.Duration(0))
+
+	ctx := context.Background()
+
+	auctionRequest := AuctionRequest{
+		BidRequest:     bidRequest,
+		UserSyncs:      &emptyUsersync{},
+		FirstPartyData: fpdData,
+	}
+
+	debugLog := &DebugLog{DebugOverride: true, DebugEnabledOrOverridden: true}
+
+	outBidResponse, err := e.HoldAuction(ctx, auctionRequest, debugLog)
+
+	assert.NotNilf(t, outBidResponse, "outBidResponse should not be nil")
+	assert.Nil(t, err, "Error should be nil")
+
+	request := e.adapterMap[openrtb_ext.BidderAppnexus].(*fpdBidder).req
+
+	assert.NotNil(t, request, "Bidder request should not be nil")
+	assert.Equal(t, request.Site, apnFpd.Site, "Site is incorrect")
+	assert.Equal(t, request.App, apnFpd.App, "App is incorrect")
+	assert.Equal(t, request.User, apnFpd.User, "User is incorrect")
+
+}
+
 type exchangeSpec struct {
 	GDPREnabled       bool                   `json:"gdpr_enabled"`
 	IncomingRequest   exchangeRequest        `json:"incomingRequest"`
@@ -3561,6 +3615,15 @@ func (b *validatingBidder) requestBid(ctx context.Context, request *openrtb2.Bid
 	}
 
 	return
+}
+
+type fpdBidder struct {
+	req *openrtb2.BidRequest
+}
+
+func (b *fpdBidder) requestBid(ctx context.Context, request *openrtb2.BidRequest, name openrtb_ext.BidderName, bidAdjustment float64, conversions currency.Conversions, reqInfo *adapters.ExtraRequestInfo, accountDebugAllowed, headerDebugAllowed bool) (seatBid *pbsOrtbSeatBid, errs []error) {
+	b.req = request
+	return &pbsOrtbSeatBid{}, nil
 }
 
 func diffOrtbRequests(t *testing.T, description string, expected *openrtb2.BidRequest, actual *openrtb2.BidRequest) {
