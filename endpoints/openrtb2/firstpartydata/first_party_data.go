@@ -59,9 +59,9 @@ func GetFPDData(request []byte) ([]byte, map[string][]byte, error) {
 
 func BuildFPD(bidRequest *openrtb2.BidRequest, fpdBidderData map[openrtb_ext.BidderName]*openrtb_ext.FPDData, firstPartyData map[string][]byte) (map[openrtb_ext.BidderName]*openrtb_ext.FPDData, []error) {
 
-	// TODO: If an attribute doesn't pass defined validation checks,
+	// If an attribute doesn't pass defined validation checks,
 	// it should be removed from the request with a warning placed
-	// in the messages section of debug output and a log message emitted 1% of the time.
+	// in the messages section of debug output
 	// The auction should continue
 
 	errL := make([]error, 0)
@@ -155,7 +155,7 @@ func mergeFPD(input interface{}, fpd interface{}, data map[string][]byte, value 
 
 	//If {site,app,user}.data exists, merge it into {site,app,user}.ext.data
 	//Question: if fpdSite.Ext.data exists should it be overwritten with Site.data?
-	if data[value] != nil {
+	if len(data[value]) > 0 {
 		extData := buildExtData(data[value])
 		return jsonpatch.MergePatch(resultMerged, extData)
 	}
