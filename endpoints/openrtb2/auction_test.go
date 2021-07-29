@@ -2919,7 +2919,7 @@ func TestFPDHoldAuction(t *testing.T) {
 			if len(fpdFile.ValidationErrors) > 0 {
 				assert.Equal(t, len(fpdFile.ValidationErrors), len(actualRequest.Warnings))
 				for i := range fpdFile.ValidationErrors {
-					assert.Contains(t, fpdFile.ValidationErrors[i], actualRequest.Warnings[i].Error(), "Incorrect first party data warning message")
+					assert.Contains(t, actualRequest.Warnings[i].Error(), fpdFile.ValidationErrors[i], "Incorrect first party data warning message")
 				}
 			}
 
