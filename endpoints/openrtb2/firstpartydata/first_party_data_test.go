@@ -126,7 +126,85 @@ func TestGetFPDData(t *testing.T) {
 			},
 			errorExpected: false,
 			errorContains: "",
-		}, {
+		},
+		{
+			description: "User FPD not array",
+			input: []byte(`{
+  				"id": "bid_id",
+  				"user": {
+  				  "id": "appId",
+  				  "data": {"someuserfpd": "userfpdDataTest"},
+  				  "ext": {"data": 123}
+  				},
+  				"tmax": 5000,
+  				"source": {
+  				  "tid": "ad839de0-5ae6-40bb-92b2-af8bad6439b3"
+  				}
+			}`),
+			output: []byte(`{
+  				"id": "bid_id",
+  				"user": {
+  				  "id": "appId",
+  				  "ext": {"data": 123}
+  				},
+  				"tmax": 5000,
+  				"source": {
+  				  "tid": "ad839de0-5ae6-40bb-92b2-af8bad6439b3"
+  				}
+			}`),
+			expectedFpdData: map[string][]byte{
+				"user": []byte(`{"someuserfpd": "userfpdDataTest"}`),
+				"app":  {},
+				"site": {},
+			},
+			errorExpected: false,
+			errorContains: "",
+		},
+		{
+			description: "User.data array present",
+			input: []byte(`{
+  				"id": "bid_id",
+  				"user": {
+  				  "id": "appId",
+  				  "data": [
+					{
+					  "id":"userdataid",
+					  "name": "username"
+					}
+				  ],
+  				  "ext": {"data": 123}
+  				},
+  				"tmax": 5000,
+  				"source": {
+  				  "tid": "ad839de0-5ae6-40bb-92b2-af8bad6439b3"
+  				}
+			}`),
+			output: []byte(`{
+  				"id": "bid_id",
+  				"user": {
+  				  "id": "appId",
+  				  "data": [
+					{
+					  "id":"userdataid",
+					  "name": "username"
+					}
+				  ],
+  				  "ext": {"data": 123}
+  				},
+  				"tmax": 5000,
+  				"source": {
+  				  "tid": "ad839de0-5ae6-40bb-92b2-af8bad6439b3"
+  				}
+			}`),
+			expectedFpdData: map[string][]byte{
+				"app":  {},
+				"user": {},
+				"site": {},
+			},
+			errorExpected: false,
+			errorContains: "",
+		},
+		{
 			description: "Malformed input",
 			input: []byte(`{
   				"id": "bid_id",
