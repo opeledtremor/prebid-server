@@ -2838,7 +2838,9 @@ func TestValidateFpdRequest(t *testing.T) {
 				assert.Equal(t, len(fpdFile.ValidationErrors), len(errL), "Incorrect number of expected errors")
 
 				//subject to change to for loop
-				assert.Contains(t, errL[0].Error(), fpdFile.ValidationErrors[0], "Validation Error is incorrect")
+				for i := range errL {
+					assert.Contains(t, errL[i].Error(), fpdFile.ValidationErrors[i], "Validation Error is incorrect")
+				}
 			} else {
 				assert.Len(t, errL, 0, "Error list should be empty")
 			}
